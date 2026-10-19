@@ -1,0 +1,3 @@
+1.
+F:\retargeting\new_retargeting\hand_reconstruction\run_humanplus_stereo_reconstruction.py
+输入视频，输出手部关键点文件
