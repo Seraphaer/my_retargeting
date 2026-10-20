@@ -1,15 +1,19 @@
-"""Run HumanPlus preparation, WiLoR extraction, SSH smoothing, triangulation, and fill.
+"""Run HumanPlus preparation, WiLoR extraction, gripper poses, and base search.
 
 Edit CONFIG before running. This script saves each stage and does not draw
-video. Render the three stages with ``test/render_keypoint_stages.py``.
+video. Render keypoints with ``test/render_keypoint_stages.py`` and the solved
+arms with ``test/render_arm_ik.py``.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from importlib import import_module
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import sys
 
+from arm_ik.model import ArmModel
 from contracts import (
     load_rectified_stereo,
     save_camera_keypoints,
@@ -17,7 +21,22 @@ from contracts import (
     save_rectified_stereo,
     save_repaired_hands,
     save_triangulated_hands,
+    save_arm_anchors,
 )
+
+
+def _load_stage(filename: str):
+    """Load a dotted stage filename such as ``8.1_solve_arm_ik.py``."""
+
+    path = Path(__file__).with_name(filename)
+    spec = spec_from_file_location(filename.replace(".", "_"), path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load pipeline stage {path}.")
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
 
 _prepare = import_module("1_prepare_humanplus")
 _extract = import_module("2_extract_wilor")
@@ -42,6 +61,10 @@ map_gripper_poses = _gripper.map_gripper_poses
 GripperFilterConfig = _filter.GripperFilterConfig
 STAGE_ORDER = _filter.STAGE_ORDER
 filter_gripper_poses = _filter.filter_gripper_poses
+_arm_ik = _load_stage("8.1_solve_arm_ik.py")
+_anchor = _load_stage("8.2_auto_anchor.py")
+make_mink_solver = _arm_ik.make_mink_solver
+auto_anchor = _anchor.auto_anchor
 
 
 # =============================================================================
@@ -62,6 +85,7 @@ LONG_GAP_FRAMES = 10
 SMOOTH_CLOSING_INPUTS = True
 SMOOTH_REACH_INPUTS = True
 ENABLED_GRIPPER_STAGES = STAGE_ORDER
+URDF_PATH = MY_RETARGETING_ROOT / "urdf" / "g1_29dof_with_dex1_1.urdf"
 
 
 def main() -> None:
@@ -125,6 +149,18 @@ def main() -> None:
         save_gripper_poses(stage_pose, RUN_DIRECTORY / f"gripper_pose_after_{stage_name}.npz")
         final_pose = stage_pose
     save_gripper_poses(final_pose, RUN_DIRECTORY / "gripper_poses.npz")
+    anchors = auto_anchor(
+        final_pose,
+        {
+            "left": make_mink_solver(URDF_PATH, "left"),
+            "right": make_mink_solver(URDF_PATH, "right"),
+        },
+        {
+            "left": ArmModel.from_urdf(URDF_PATH, "left"),
+            "right": ArmModel.from_urdf(URDF_PATH, "right"),
+        },
+    )
+    save_arm_anchors(anchors, RUN_DIRECTORY / "arm_anchors.npz")
     latest_run_path = MY_RETARGETING_ROOT / "output" / "latest_run.txt"
     latest_run_path.write_text(str(RUN_DIRECTORY), encoding="utf-8")
     print(f"HumanPlus WiLoR keypoints saved: {RUN_DIRECTORY}")
@@ -134,7 +170,9 @@ def main() -> None:
     print(f"  left invalid frames after gate: {int(filled.left.invalid_mask.sum())}")
     print(f"  right invalid frames after gate: {int(filled.right.invalid_mask.sum())}")
     print(f"  gripper stages saved: {len(pose_snapshots)}")
-    print("Render with test/render_keypoint_stages.py")
+    print(f"  left anchor present: {anchors.left.present} score={anchors.left.score:.3f}")
+    print(f"  right anchor present: {anchors.right.present} score={anchors.right.score:.3f}")
+    print("Render arms with test/render_arm_ik.py")
 
 
 if __name__ == "__main__":

@@ -257,6 +257,54 @@ class GripperPoses:
 
 
 @dataclass(frozen=True)
+class ArmAnchor:
+    """One arm base chosen in the left rectified camera.
+
+    An absent anchor keeps NaN pose fields and ``present`` false. A present
+    anchor stores the camera-from-base translation in meters and a scipy xyzw
+    quaternion. ``score`` is the Ego2Robot placement score.
+    """
+
+    side: str
+    present: bool
+    position_m: np.ndarray
+    quaternion_xyzw: np.ndarray
+    score: float
+    feasibility_rate: float
+    mean_reach_fraction: float
+    coordinate_frame: str = COORDINATE_FRAME_LEFT_RECTIFIED
+
+    def __post_init__(self) -> None:
+        if self.side not in {"left", "right"}:
+            raise ValueError("Arm anchor side must be 'left' or 'right'.")
+        if self.coordinate_frame != COORDINATE_FRAME_LEFT_RECTIFIED:
+            raise ValueError("Arm anchors must stay in the left rectified camera.")
+        _require_shape(self.position_m, (3,), f"{self.side}.anchor.position_m")
+        _require_shape(self.quaternion_xyzw, (4,), f"{self.side}.anchor.quaternion_xyzw")
+        if not self.present:
+            return
+        if not np.all(np.isfinite(self.position_m)) or not np.all(np.isfinite(self.quaternion_xyzw)):
+            raise ValueError(f"{self.side} anchor pose must be finite when present.")
+        if not np.isclose(np.linalg.norm(self.quaternion_xyzw), 1.0):
+            raise ValueError(f"{self.side} anchor quaternion must be a unit quaternion.")
+        if not np.isfinite(self.score):
+            raise ValueError(f"{self.side} anchor score must be finite when present.")
+
+
+@dataclass(frozen=True)
+class ArmAnchors:
+    """Independent left and right bases from one anchor search."""
+
+    left: ArmAnchor
+    right: ArmAnchor
+    pair_score: float
+
+    def __post_init__(self) -> None:
+        if self.left.side != "left" or self.right.side != "right":
+            raise ValueError("ArmAnchors requires one left anchor and one right anchor.")
+
+
+@dataclass(frozen=True)
 class TriangulatedHands:
     """Both anatomical hands after stereo triangulation, with no temporal repair."""
 
@@ -476,6 +524,33 @@ def save_gripper_poses(result: GripperPoses, path: Path) -> Path:
     return path
 
 
+def save_arm_anchors(result: ArmAnchors, path: Path) -> Path:
+    """Serialize both arm bases without changing the gripper trajectory."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, np.ndarray] = {"pair_score": np.asarray(result.pair_score, dtype=np.float64)}
+    for name, anchor in (("left", result.left), ("right", result.right)):
+        payload[f"{name}_present"] = np.asarray(anchor.present, dtype=bool)
+        payload[f"{name}_position_m"] = np.asarray(anchor.position_m, dtype=np.float64)
+        payload[f"{name}_quaternion_xyzw"] = np.asarray(anchor.quaternion_xyzw, dtype=np.float64)
+        payload[f"{name}_score"] = np.asarray(anchor.score, dtype=np.float64)
+        payload[f"{name}_feasibility_rate"] = np.asarray(anchor.feasibility_rate, dtype=np.float64)
+        payload[f"{name}_mean_reach_fraction"] = np.asarray(anchor.mean_reach_fraction, dtype=np.float64)
+    np.savez_compressed(path, **payload)
+    return path
+
+
+def load_arm_anchors(path: Path) -> ArmAnchors:
+    """Load both arm bases saved by ``save_arm_anchors``."""
+
+    data = np.load(path)
+    return ArmAnchors(
+        left=_load_anchor("left", data),
+        right=_load_anchor("right", data),
+        pair_score=float(data["pair_score"]),
+    )
+
+
 def load_gripper_poses(path: Path) -> GripperPoses:
     """Load both gripper poses saved by ``save_gripper_poses``."""
 
@@ -485,6 +560,18 @@ def load_gripper_poses(path: Path) -> GripperPoses:
     return GripperPoses(
         left=_load_gripper("left", data, frame_indices, timestamps_ns),
         right=_load_gripper("right", data, frame_indices, timestamps_ns),
+    )
+
+
+def _load_anchor(side: str, data: np.lib.npyio.NpzFile) -> ArmAnchor:
+    return ArmAnchor(
+        side=side,
+        present=bool(data[f"{side}_present"]),
+        position_m=np.asarray(data[f"{side}_position_m"], dtype=np.float64),
+        quaternion_xyzw=np.asarray(data[f"{side}_quaternion_xyzw"], dtype=np.float64),
+        score=float(data[f"{side}_score"]),
+        feasibility_rate=float(data[f"{side}_feasibility_rate"]),
+        mean_reach_fraction=float(data[f"{side}_mean_reach_fraction"]),
     )
 
 
